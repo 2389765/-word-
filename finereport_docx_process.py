@@ -1,6 +1,8 @@
 import os
 import re
+import pythoncom
 import win32com.client
+from time import sleep
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -8,7 +10,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.text import WD_LINE_SPACING
 from docx.shared import Inches, Pt, RGBColor
 
-word = win32com.client.Dispatch('Word.Application')
+word = win32com.client.DispatchEx('Word.Application')
 word.visible = False
 word.DisplayAlerts = False
 
@@ -30,6 +32,18 @@ class doc_process:
         self.modify()
         return True
 
+    def filetype_check(self,path):
+        filename, filetype = os.path.splitext(path)
+        if filetype == '.doc' or filetype == '.rtf':
+            doc = word.Documents.Open(path)
+            doc.SaveAs("{}.docx".format(filename), 12)
+            print("{}.docx 已生成".format(filename))
+            doc.Close()
+            return "{}.docx".format(filename)
+        elif filetype == '.docx':
+            return path    
+        
+        
     def extract_picture(self):
         """
         按照图片产生的顺序保存图片的_rels，之后通过该值导出图片并回插
@@ -91,25 +105,29 @@ class doc_process:
                             para_heading = self.new_doc.add_heading("", level=1)
                             run = para_heading.add_run(paragraph.text)
 
+                        # picture
+                        elif '图' in paragraph.text[:2]:
+                            para = self.new_doc.add_paragraph()
+                            run = para.add_run(paragraph.text)
+                            with open(root_path + "\\image.png", "wb") as p:
+                                p.write(self.doc.part._rels[pictures[image_index]].target_part.blob)
+                                image_index += 1
+                            pic = self.new_doc.add_picture(root_path + "\\image.png", height=Inches(3))                        
+                        
                         # text
                         else:
                             text = paragraph.text.split('。', 1)
                             para = self.new_doc.add_paragraph()
                             if len(text) > 1:
-                                run = para.add_run(text)
-
-                            elif '图' in text[0][:2]:
-                                run = para.add_run(text[0])
-                                with open(root_path + "\\image.png", "wb") as p:
-                                    p.write(self.doc.part._rels[pictures[image_index]].target_part.blob)
-                                    image_index += 1
-                                pic = self.new_doc.add_picture(root_path + "\\image.png", height=Inches(3))
+                                run = para.add_run('。'.join(text))
 
         self.new_doc.add_page_break()
         self.new_doc.save(root_path + '\\temporary.docx')
         return
 
     def merge_docx(self):
+        pythoncom.CoInitialize()
+        word = win32com.client.DispatchEx('Word.Application')
         output = word.Documents.Add()
         output.Application.Selection.InsertFile(root_path + '\\temporary.docx')
         output.Application.Selection.InsertFile(self.table_path)
@@ -118,7 +136,7 @@ class doc_process:
         return
     
     def font_setting(self,run,text_level):
-        font_color = RGBColor(250,0,0)
+        font_color = RGBColor(0,0,0)
         
         if text_level == '标题':
             run.font.name = u'黑体'
@@ -186,31 +204,36 @@ class doc_process:
                 para.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 for run in para.runs: self.font_setting(run,'子标题')
 
-
+            # 调节图的语句
+            elif '图' in para.text[:2]:
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in para.runs: self.font_setting(run,'图标题')                
             # 正文
-            else:
-                text = para.text.split('。', 1)
-                # 调节图的语句
-                if '图' in text[0][:2]:
-                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for run in para.runs: self.font_setting(run,'图标题')
-
-                
+            elif len(para.text.split('。', 1)) > 1:
                 # 调节正文文本
-                elif len(text) > 1:
-                    para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                    # 统一每段的缩进为两格
-                    run = para.runs[0]
-                    t = re.sub(r"/\s+/", "", run.text)
-                    run.text = r"  " + re.sub(r"\xa0", "", t)
-                    
-                    text = run.text.split("。",1)
-                    run.text = text[0]
-                    self.font_setting(run,'开头')
-                    
-                    run = para.add_run(text[1])
-                    self.font_setting(run,'正文')
-                else:
-                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                # 统一每段的缩进为两格
+                run = para.runs[0]
+                t = re.sub(r"/\s+/", "", run.text)
+                run.text = r"  " + re.sub(r"\xa0", "", t)
+                
+                # text：该para下的所有文本，切分为了开头和正文
+                # 使用for循环将该para置空（重新写开头(第一个run)和正文(最后一个run)，解决para的run多于一个的问题）
+                text = "。".join([_.text for _ in para.runs]).split("。",1)
+                for _ in para.runs: _.text = ''
+                
+                run.text = text[0] + "。"
+                self.font_setting(run,'开头')
+                                    
+                run = para.add_run(text[1])
+                self.font_setting(run,'正文')
+            else:
+                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.save(self.to_file)
         return
+
+if __name__ == '__main__':
+    text_path = 'C:\\Users\\iceberg\\Desktop\\自动化word\\2.0通信1207图文.docx'
+    table_path = 'C:\\Users\\iceberg\\Desktop\\自动化word\\2.0通信1207表格.docx'
+    target_path = 'C:\\Users\\iceberg\\Desktop\\自动化word\\2.0通信1207.docx'
+    doc_process(text_path, table_path, target_path).run()
