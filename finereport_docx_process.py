@@ -1,14 +1,17 @@
 import os
 import re
+import asyncio
 import pythoncom
 import win32com.client
-from time import sleep
+import time
 
 from docx import Document
 from docx.oxml.ns import qn
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.text import WD_LINE_SPACING
 from docx.shared import Inches, Pt, RGBColor
+from docxcompose.composer import Composer
+
 
 word = win32com.client.DispatchEx('Word.Application')
 word.visible = False
@@ -20,16 +23,16 @@ root_path = os.getcwd()
 class doc_process:
 
     def __init__(self, text, table, target):
-        self.table_path = table
-        self.to_file = target
         self.new_doc = Document()
-        self.doc = Document(text)
+        self.table_path = self.filetype_check(table)
+        self.doc = Document(self.filetype_check(text))
+        self.to_file = target
+        
 
     def run(self):
-        self.extract_picture()
         self.extract_text()
-        self.merge_docx()
-        self.modify()
+        asyncio.run(self.merge_docx())
+        asyncio.run(self.modify())
         return True
 
     def filetype_check(self,path):
@@ -80,7 +83,8 @@ class doc_process:
                     index.remove([k % length, k // length])
                 k += 1
         return index
-
+    
+    
     def extract_text(self):
         """
         提取出表格中的文本并且写入到新的文档中
@@ -88,6 +92,7 @@ class doc_process:
         """
         image_index = 0
         pictures = self.extract_picture()
+        title_encountered = False
         for table in self.doc.tables:
             index = self.extract_table(table)
 
@@ -112,30 +117,44 @@ class doc_process:
                             with open(root_path + "\\image.png", "wb") as p:
                                 p.write(self.doc.part._rels[pictures[image_index]].target_part.blob)
                                 image_index += 1
-                            pic = self.new_doc.add_picture(root_path + "\\image.png", height=Inches(3))                        
+                            pic = self.new_doc.add_picture(root_path + "\\image.png", width=Inches(5.5))                        
                         
                         # text
                         else:
-                            text = paragraph.text.split('。', 1)
                             para = self.new_doc.add_paragraph()
-                            if len(text) > 1:
-                                run = para.add_run('。'.join(text))
+                            # 防止标题被识别为正文
+                            if len(paragraph.text.split('。', 1)) > 1:
+                                run = para.add_run(paragraph.text)
+
 
         self.new_doc.add_page_break()
         self.new_doc.save(root_path + '\\temporary.docx')
         return
 
-    def merge_docx(self):
-        pythoncom.CoInitialize()
-        word = win32com.client.DispatchEx('Word.Application')
-        output = word.Documents.Add()
-        output.Application.Selection.InsertFile(root_path + '\\temporary.docx')
-        output.Application.Selection.InsertFile(self.table_path)
-        output.SaveAs(self.to_file) 
-        word.Quit()
+    async def InsertFile(self,doc_to_insert,from_doc_path):
+        doc_to_insert.Application.Selection.InsertFile(from_doc_path)
+    
+    async def merge_docx(self):
+        # time.sleep(30)  # 电脑速度慢时，需要等待以防前面的word修改程序未完成
+        # pythoncom.CoInitialize()
+        # word = win32com.client.DispatchEx('Word.Application')
+        # output = word.Documents.Add()
+        # insert1 = asyncio.create_task(self.InsertFile(output,root_path + '\\temporary.docx'))
+        # insert2 = asyncio.create_task(self.InsertFile(output,self.table_path))
+        # await insert1
+        # await insert2
+        # # output.Application.Selection.InsertFile(root_path + '\\temporary.docx')
+        # # output.Application.Selection.InsertFile(self.table_path)
+        # output.SaveAs(self.to_file) 
+        # word.Quit()
+        
+        doc = Document(root_path + '\\temporary.docx')
+        cp = Composer(doc)
+        cp.append(Document(self.table_path))
+        doc.save(self.to_file)
         return
     
-    def font_setting(self,run,text_level):
+    async def font_setting(self,run,text_level):
         font_color = RGBColor(0,0,0)
         
         if text_level == '标题':
@@ -179,15 +198,16 @@ class doc_process:
             run.italic = False
         return
 
-    def modify(self):
-        
+    
+    async def modify(self):
+        task_list = []
         # 文档
         doc = Document(self.to_file)
 
         # 标题
         doc.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
         doc.paragraphs[0].paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
-        for run in doc.paragraphs[0].runs: self.font_setting(run,'标题')
+        for run in doc.paragraphs[0].runs: task_list.append(asyncio.create_task(self.font_setting(run,'标题')))
 
 
         # 全文1.5倍行距
@@ -202,12 +222,12 @@ class doc_process:
             # 各级小标题
             elif any([True if t in para.text[0] else False for t in ['一', '二', '三', '四', '五', '六', '七', '八', '九']]):
                 para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                for run in para.runs: self.font_setting(run,'子标题')
+                for run in para.runs: task_list.append(asyncio.create_task(self.font_setting(run,'子标题')))
 
             # 调节图的语句
             elif '图' in para.text[:2]:
                     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for run in para.runs: self.font_setting(run,'图标题')                
+                    for run in para.runs: task_list.append(asyncio.create_task(self.font_setting(run,'图标题')))               
             # 正文
             elif len(para.text.split('。', 1)) > 1:
                 # 调节正文文本
@@ -219,21 +239,27 @@ class doc_process:
                 
                 # text：该para下的所有文本，切分为了开头和正文
                 # 使用for循环将该para置空（重新写开头(第一个run)和正文(最后一个run)，解决para的run多于一个的问题）
-                text = "。".join([_.text for _ in para.runs]).split("。",1)
+                text = "".join([_.text for _ in para.runs]).split("。",1)
                 for _ in para.runs: _.text = ''
                 
                 run.text = text[0] + "。"
-                self.font_setting(run,'开头')
+                task_list.append(asyncio.create_task(self.font_setting(run,'开头')))
                                     
                 run = para.add_run(text[1])
-                self.font_setting(run,'正文')
+                task_list.append(asyncio.create_task(self.font_setting(run,'正文')))
             else:
                 para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        for each_task in task_list:
+            await each_task
+        
         doc.save(self.to_file)
         return
 
 if __name__ == '__main__':
-    text_path = 'C:\\Users\\iceberg\\Desktop\\自动化word\\2.0通信1207图文.docx'
-    table_path = 'C:\\Users\\iceberg\\Desktop\\自动化word\\2.0通信1207表格.docx'
-    target_path = 'C:\\Users\\iceberg\\Desktop\\自动化word\\2.0通信1207.docx'
+    text_path = 'C:/Users/iceberg/Desktop/2.0增值图文宁夏.doc'
+    table_path = 'C:/Users/iceberg/Desktop/2.0增值表格宁夏.doc'
+    target_path = 'C:/Users/iceberg/Desktop/2.0增值宁夏.docx'
     doc_process(text_path, table_path, target_path).run()
+
+
